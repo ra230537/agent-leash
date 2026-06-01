@@ -1,16 +1,31 @@
 import type { Plugin } from "@opencode-ai/plugin"
 import { initDatabase } from "./db.js"
-import { createExchangeCache, updatePrompt, appendResponse, getExchange } from "./cache.js"
 import { isCommand, processCommand } from "./feedback.js"
-import { shouldAutoDetect, autoCapture } from "./detect.js"
+import { createSummarizer } from "./summarize.js"
 import type { PluginOptions } from "./types.js"
-import type { AppPart } from "./part-types.js"
+import { PREFERENCES_PATH } from "./types.js"
+import { logInfo, logWarn, logError } from "./logger.js"
+import { readFileSync, existsSync, mkdirSync } from "node:fs"
+import { homedir } from "node:os"
+import { dirname } from "node:path"
+
+function resolvePreferencesPath(): string {
+  const raw = PREFERENCES_PATH
+  if (raw.startsWith("~")) {
+    return raw.replace(/^~/, homedir())
+  }
+  return raw
+}
 
 const plugin: Plugin = async (input, options) => {
   const config = (options ?? {}) as PluginOptions
-  const autoDetect = config.autoDetect !== undefined ? config.autoDetect : true
+  logInfo(`Plugin inicializando v0.3 (dbPath=${config.dbPath ?? "default"})`)
+
   const db = await initDatabase(config)
-  const exchangeCache = createExchangeCache()
+  const summarizeFeedback = createSummarizer(input.client as any)
+
+  db.rebuildPreferencesFile()
+  logInfo("Banco de dados inicializado, preferências reconstruídas")
 
   function getTextFromParts(parts: readonly { type: string; text?: string }[]): string {
     return parts
@@ -20,54 +35,66 @@ const plugin: Plugin = async (input, options) => {
   }
 
   return {
-    "experimental.text.complete": async (hookInput, output) => {
-      appendResponse(
-        exchangeCache,
-        hookInput.sessionID,
-        output.text,
-        hookInput.messageID
-      )
-    },
-
     "chat.message": async (hookInput, output) => {
       const sessionID = hookInput.sessionID
-      const messageID = hookInput.messageID || output.message.id
-      const workspace = input.worktree
+      const messageID = hookInput.messageID || (output.message as any)?.id || ""
       const text = getTextFromParts(output.parts)
 
-      if (isCommand(text)) {
-        const cacheEntry = getExchange(exchangeCache, sessionID)
-        const result = processCommand(
-          text,
-          sessionID,
-          messageID,
-          workspace,
-          db,
-          cacheEntry
-        )
+      if (!isCommand(text)) return
 
-        if (result.parts.length > 0) {
-          output.parts.splice(0, output.parts.length)
-          for (const part of result.parts) {
-            output.parts.push(part)
-          }
+      const trimmed = text.trim()
+      const shortText = trimmed.slice(0, 80).replace(/\n/g, "\\n")
+      logInfo(`Comando detectado: "${shortText}"`)
+
+      const result = processCommand(trimmed, sessionID, messageID, db)
+
+      if (result.parts.length > 0) {
+        output.parts.splice(0, output.parts.length)
+        for (const part of result.parts) {
+          output.parts.push(part as any)
         }
-        return
+        logInfo(`Parts substituídas: "${result.parts[0]?.text?.slice(0, 60)}..."`)
       }
 
-      if (autoDetect) {
-        const cacheEntry = getExchange(exchangeCache, sessionID)
-        if (cacheEntry && shouldAutoDetect(text, cacheEntry.response)) {
-          autoCapture(text, cacheEntry, workspace, db)
+      if (result.feedbackId !== undefined) {
+        const match = trimmed.match(/^#\s*(.+)$/)
+        const rawText = match ? match[1].trim() : ""
+        if (rawText) {
+          logInfo(`Agendando resumo para feedback #${result.feedbackId}`)
+          summarizeFeedback(rawText).then((rule) => {
+            if (rule) {
+              db.updateRule(result.feedbackId!, rule)
+              db.rebuildPreferencesFile()
+              logInfo(`Resumo salvo para feedback #${result.feedbackId}: "${rule}"`)
+            } else {
+              logWarn(`Resumo retornou vazio para feedback #${result.feedbackId}`)
+            }
+          }).catch((err) => {
+            logError(`Falha ao resumir feedback #${result.feedbackId}`, err)
+          })
         }
       }
+    },
 
-      updatePrompt(exchangeCache, sessionID, text)
+    "experimental.chat.system.transform": async (hookInput, output) => {
+      try {
+        const prefPath = resolvePreferencesPath()
+        if (!existsSync(prefPath)) return
+
+        const content = readFileSync(prefPath, "utf-8")
+        if (!content || content.trim() === "") return
+
+        output.system.push(content)
+        logInfo(`preferences.md (${content.length} bytes) anexado ao system prompt`)
+      } catch (err) {
+        logError("Falha ao ler preferences.md", err)
+      }
     },
 
     dispose: async () => {
+      logInfo("Plugin sendo finalizado")
       db.close()
-      exchangeCache.clear()
+      logInfo("Plugin finalizado")
     },
   }
 }

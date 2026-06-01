@@ -1,8 +1,8 @@
-import { parseMessage, isCommand, buildFeedbackParts, buildListParts, buildDeleteParts, buildErrorParts, processCommand, formatDate as fmtDate } from "./src/feedback.js"
-import { createExchangeCache, ensureExchange, updatePrompt, appendResponse, getExchange } from "./src/cache.js"
-import { shouldAutoDetect, autoCapture } from "./src/detect.js"
+import { parseMessage, isCommand, processCommand } from "./src/feedback.js"
 import { initDatabase } from "./src/db.js"
-import { FEEDBACK_REGEX, DELETE_REGEX, LIST_REGEX, AUTO_DETECT_REGEX } from "./src/types.js"
+import { PREFERENCES_PATH } from "./src/types.js"
+import { homedir } from "node:os"
+import { readFileSync, unlinkSync, existsSync } from "node:fs"
 
 let passed = 0
 let failed = 0
@@ -37,117 +37,90 @@ function assertEq<T>(a: T, b: T, msg?: string) {
 }
 
 // ============================================================
-// 1. Regex Tests
+// 1. Regex Tests (v0.3 — no score, no quotes)
 // ============================================================
-console.log("\n--- Regex Tests ---")
+console.log("\n--- Regex Tests (v0.3) ---")
 
-test("FEEDBACK_REGEX: //3 \"test\"", () => {
-  const m = "//3 \"test\"".match(FEEDBACK_REGEX)
+test("FEEDBACK_REGEX: # texto", () => {
+  const m = "# texto".match(/^#\s*(.+)$/)
   assert(m !== null)
-  assertEq(m![1], "3")
-  assertEq(m![2], "test")
+  assertEq(m![1], "texto")
 })
 
-test("FEEDBACK_REGEX: //5 \"hello world\"", () => {
-  const m = "//5 \"hello world\"".match(FEEDBACK_REGEX)
+test("FEEDBACK_REGEX: # use Kotlin em vez de Python", () => {
+  const m = "# use Kotlin em vez de Python".match(/^#\s*(.+)$/)
   assert(m !== null)
-  assertEq(m![1], "5")
-  assertEq(m![2], "hello world")
+  assertEq(m![1], "use Kotlin em vez de Python")
 })
 
-test("FEEDBACK_REGEX: // 4 \"spaces\"", () => {
-  const m = "// 4 \"spaces\"".match(FEEDBACK_REGEX)
+test("FEEDBACK_REGEX: #   com espaços", () => {
+  const m = "#   com espaços".match(/^#\s*(.+)$/)
   assert(m !== null)
-  assertEq(m![1], "4")
-})
-
-test("FEEDBACK_REGEX: //3\"notext\" (no space) valid", () => {
-  const m = "//3\"notext\"".match(FEEDBACK_REGEX)
-  assert(m !== null)
-  assertEq(m![1], "3")
-  assertEq(m![2], "notext")
-})
-
-test("FEEDBACK_REGEX: //0 \"zero\" matches (validation in parseMessage)", () => {
-  const m = "//0 \"zero\"".match(FEEDBACK_REGEX)
-  assert(m !== null, "regex now matches any digit, validation in parseMessage")
-  assertEq(m![1], "0")
-})
-
-test("FEEDBACK_REGEX: //6 \"six\" matches (validation in parseMessage)", () => {
-  const m = "//6 \"six\"".match(FEEDBACK_REGEX)
-  assert(m !== null, "regex now matches any digit, validation in parseMessage")
-  assertEq(m![1], "6")
+  assertEq(m![1], "com espaços")
 })
 
 test("FEEDBACK_REGEX: normal text not matched", () => {
-  assert("hello world".match(FEEDBACK_REGEX) === null)
+  assert("hello world".match(/^#\s*(.+)$/) === null)
 })
 
-test("DELETE_REGEX: //delete 42", () => {
-  const m = "//delete 42".match(DELETE_REGEX)
+test("FEEDBACK_REGEX: #list also matches generic regex (checked first)", () => {
+  const m = "#list".match(/^#\s*(.+)$/)
+  assert(m !== null)
+  assertEq(m![1], "list")
+})
+
+test("DELETE_REGEX: #delete 42", () => {
+  const m = "#delete 42".match(/^#delete\s+(\d+)$/)
   assert(m !== null)
   assertEq(m![1], "42")
 })
 
-test("LIST_REGEX: //list", () => {
-  assert(LIST_REGEX.test("//list"))
+test("DELETE_REGEX: #delete 1 single digit", () => {
+  const m = "#delete 1".match(/^#delete\s+(\d+)$/)
+  assert(m !== null)
+  assertEq(m![1], "1")
 })
 
-test("LIST_REGEX: //list with trailing space", () => {
-  assert(LIST_REGEX.test("//list   ") === false) // exact match only
+test("DELETE_REGEX: #delete without number fails", () => {
+  assert("#delete".match(/^#delete\s+(\d+)$/) === null)
 })
 
-test("AUTO_DETECT_REGEX: Na verdade, isso está errado", () => {
-  assert(AUTO_DETECT_REGEX.test("Na verdade, isso está errado"))
+test("LIST_REGEX: #list", () => {
+  assert(/^#list$/.test("#list"))
 })
 
-test("AUTO_DETECT_REGEX: Corrigindo: use async/await", () => {
-  assert(AUTO_DETECT_REGEX.test("Corrigindo: use async/await"))
-})
-
-test("AUTO_DETECT_REGEX: Melhor seria fazer diferente", () => {
-  assert(AUTO_DETECT_REGEX.test("Melhor seria fazer diferente"))
-})
-
-test("AUTO_DETECT_REGEX: Na real o caminho é outro", () => {
-  assert(AUTO_DETECT_REGEX.test("Na real o caminho é outro"))
-})
-
-test("AUTO_DETECT_REGEX: Mas na verdade, esqueci de...", () => {
-  assert(AUTO_DETECT_REGEX.test("Mas na verdade, esqueci de..."))
-})
-
-test("AUTO_DETECT_REGEX: Just 'Na verdade' no colon fails", () => {
-  // No colon, comma, or space after the pattern word — still matches because
-  // the regex is /^(Na verdade|Na real|...)[,:\s]/i — so bare "Na verdade" followed
-  // by a space character fails? No, \s matches space. Let's test:
-  assert(AUTO_DETECT_REGEX.test("Na verdade") === false) // needs [,:\s] after
+test("LIST_REGEX: #list with trailing space fails", () => {
+  assert(/^#list$/.test("#list ") === false)
 })
 
 // ============================================================
-// 2. parseMessage Tests
+// 2. parseMessage Tests (v0.3)
 // ============================================================
-console.log("\n--- parseMessage Tests ---")
+console.log("\n--- parseMessage Tests (v0.3) ---")
 
-test("parseMessage: //3 \"good\" -> feedback type", () => {
-  const r = parseMessage("//3 \"good\"")
+test("parseMessage: # texto -> feedback type", () => {
+  const r = parseMessage("# ficou confuso, organiza em tópicos")
   assertEq(r.type, "feedback")
   if (r.type === "feedback") {
-    assertEq(r.score, 3)
-    assertEq(r.text, "good")
+    assertEq(r.text, "ficou confuso, organiza em tópicos")
   }
 })
 
-test("parseMessage: //list -> list type", () => {
-  const r = parseMessage("//list")
+test("parseMessage: #list -> list type", () => {
+  const r = parseMessage("#list")
   assertEq(r.type, "list")
 })
 
-test("parseMessage: //delete 7 -> delete type", () => {
-  const r = parseMessage("//delete 7")
+test("parseMessage: #delete 7 -> delete type", () => {
+  const r = parseMessage("#delete 7")
   assertEq(r.type, "delete")
   if (r.type === "delete") assertEq(r.id, 7)
+})
+
+test("parseMessage: #delete 42 -> delete type", () => {
+  const r = parseMessage("#delete 42")
+  assertEq(r.type, "delete")
+  if (r.type === "delete") assertEq(r.id, 42)
 })
 
 test("parseMessage: normal text -> none", () => {
@@ -155,14 +128,30 @@ test("parseMessage: normal text -> none", () => {
   assertEq(r.type, "none")
 })
 
-test("parseMessage: //0 \"bad\" -> error (invalid score)", () => {
-  const r = parseMessage("//0 \"bad\"")
+test("parseMessage: empty # -> error", () => {
+  const r = parseMessage("#")
   assertEq(r.type, "error")
 })
 
-test("parseMessage: //6 \"bad\" -> error (invalid score)", () => {
-  const r = parseMessage("//6 \"bad\"")
+test("parseMessage: # with only spaces -> error", () => {
+  const r = parseMessage("#   ")
   assertEq(r.type, "error")
+})
+
+test("parseMessage: # text with leading space", () => {
+  const r = parseMessage("  # use Kotlin")
+  assertEq(r.type, "feedback")
+  if (r.type === "feedback") {
+    assertEq(r.text, "use Kotlin")
+  }
+})
+
+test("parseMessage: #delete without number falls through to feedback", () => {
+  const r = parseMessage("#delete")
+  assertEq(r.type, "feedback")
+  if (r.type === "feedback") {
+    assertEq(r.text, "delete")
+  }
 })
 
 // ============================================================
@@ -170,374 +159,388 @@ test("parseMessage: //6 \"bad\" -> error (invalid score)", () => {
 // ============================================================
 console.log("\n--- isCommand Tests ---")
 
-test("isCommand: //list", () => assert(isCommand("//list")))
-test("isCommand: //3 \"test\"", () => assert(isCommand("//3 \"test\"")))
-test("isCommand: //delete 5", () => assert(isCommand("//delete 5")))
+test("isCommand: #list", () => assert(isCommand("#list")))
+test("isCommand: # texto", () => assert(isCommand("# texto")))
+test("isCommand: #delete 5", () => assert(isCommand("#delete 5")))
 test("isCommand: normal text", () => assert(!isCommand("hello world")))
 test("isCommand: empty", () => assert(!isCommand("")))
-test("isCommand: // with spaces before", () => assert(isCommand("  //list")))
+test("isCommand: # with spaces before", () => assert(isCommand("  #list")))
 
 // ============================================================
-// 4. Cache Tests — CRITICAL for auto-detection bug
+// 4. processCommand Tests (v0.3 — mock DB, no cache)
 // ============================================================
-console.log("\n--- Cache Tests ---")
-
-test("cache: create and get", () => {
-  const c = createExchangeCache()
-  assert(c instanceof Map)
-  assertEq(c.size, 0)
-})
-
-test("cache: ensureExchange creates entry", () => {
-  const c = createExchangeCache()
-  const entry = ensureExchange(c, "session-1")
-  assert(entry !== undefined)
-  assertEq(entry.prompt, "")
-  assertEq(entry.response, "")
-  assertEq(c.size, 1)
-})
-
-test("cache: updatePrompt sets prompt and clears response", () => {
-  const c = createExchangeCache()
-  // Simulate: assistant responded first
-  ensureExchange(c, "s1")
-  appendResponse(c, "s1", "Hello", "msg-1")
-  appendResponse(c, "s1", " World", "msg-1")
-  assertEq(getExchange(c, "s1")!.response, "Hello World")
-  
-  // Now user sends a new message
-  updatePrompt(c, "s1", "new query")
-  assertEq(getExchange(c, "s1")!.prompt, "new query")
-  // RESPONSE IS CLEARED — this is the bug for auto-detection!
-  assertEq(getExchange(c, "s1")!.response, "")
-})
-
-test("cache: appendResponse tracks messageID changes", () => {
-  const c = createExchangeCache()
-  appendResponse(c, "s1", "Part 1", "msg-1")
-  appendResponse(c, "s1", " Part 2", "msg-1")
-  assertEq(getExchange(c, "s1")!.response, "Part 1 Part 2")
-  
-  // New messageID should reset
-  appendResponse(c, "s1", "New msg", "msg-2")
-  assertEq(getExchange(c, "s1")!.response, "New msg")
-})
-
-test("cache: getExchange returns undefined for missing", () => {
-  const c = createExchangeCache()
-  assert(getExchange(c, "nonexistent") === undefined)
-})
-
-// ============================================================
-// 5. Auto-Detection Bug Reproduction
-// ============================================================
-console.log("\n--- Auto-Detection Bug Reproduction ---")
-
-test("BUG: shouldAutoDetect returns false when cache.response is empty", () => {
-  const result = shouldAutoDetect("Na verdade, o código está errado e precisa ser corrigido", "")
-  assertEq(result, false)
-})
-
-test("shouldAutoDetect returns false for short text", () => {
-  const result = shouldAutoDetect("Na verdade", "cached response text here")
-  assertEq(result, false) // shorter than 20 chars
-})
-
-test("shouldAutoDetect returns true for valid correction", () => {
-  const result = shouldAutoDetect(
-    "Na verdade, o código está errado e precisa ser corrigido urgentemente",
-    "cached response text here"
-  )
-  assertEq(result, true)
-})
-
-test("shouldAutoDetect returns false for non-matching text", () => {
-  const result = shouldAutoDetect(
-    "Can you explain this code to me more clearly please",
-    "cached response text here"
-  )
-  assertEq(result, false)
-})
-
-// Simulate the OLD broken flow (auto-detect AFTER updatePrompt)
-test("BUG REPRODUCTION (OLD): Full flow — auto-detection fails when updatePrompt runs first", () => {
-  const cache = createExchangeCache()
-  
-  appendResponse(cache, "s1", "A resposta é: use async/await para", "msg-1")
-  appendResponse(cache, "s1", " resolver o problema.", "msg-1")
-  
-  // OLD order: updatePrompt first, then auto-detect
-  updatePrompt(cache, "s1", "Na verdade, use Promises em vez de async/await")
-  
-  const entry = getExchange(cache, "s1")
-  assertEq(entry!.response, "", "BUG (old): response was cleared by updatePrompt!")
-  const detected = shouldAutoDetect("Na verdade, use Promises em vez de async/await", entry!.response)
-  assertEq(detected, false, "BUG (old): auto-detection fails because response is empty!")
-})
-
-// Simulate the NEW fixed flow (auto-detect BEFORE updatePrompt)
-test("FIX VERIFICATION: Full flow — auto-detection works when it runs before updatePrompt", () => {
-  const cache = createExchangeCache()
-  
-  appendResponse(cache, "s1", "A resposta é: use async/await para", "msg-1")
-  appendResponse(cache, "s1", " resolver o problema.", "msg-1")
-  
-  // NEW order: auto-detect first, then updatePrompt
-  const cacheEntry = getExchange(cache, "s1")
-  const detected = shouldAutoDetect("Na verdade, use Promises em vez de async/await", cacheEntry!.response)
-  assertEq(detected, true, "FIX: auto-detection now works because response is checked BEFORE clearing")
-  
-  updatePrompt(cache, "s1", "Na verdade, use Promises em vez de async/await")
-  assertEq(getExchange(cache, "s1")!.prompt, "Na verdade, use Promises em vez de async/await")
-  assertEq(getExchange(cache, "s1")!.response, "")
-})
-
-// ============================================================
-// 6. buildFeedbackParts Tests
-// ============================================================
-console.log("\n--- buildFeedbackParts Tests ---")
-
-test("buildFeedbackParts creates valid TextPart", () => {
-  const parts = buildFeedbackParts("s1", "m1", "hello")
-  assertEq(parts.length, 1)
-  assertEq(parts[0].type, "text")
-  assertEq(parts[0].text, "hello")
-  assertEq(parts[0].sessionID, "s1")
-  assertEq(parts[0].messageID, "m1")
-  assert(typeof parts[0].id === "string")
-  assert(parts[0].id.length > 0)
-})
-
-test("buildDeleteParts", () => {
-  const parts = buildDeleteParts("s1", "m1", 5)
-  assert(parts[0].text.includes("5"))
-  assert(parts[0].text.includes("deletado"))
-})
-
-test("buildErrorParts", () => {
-  const parts = buildErrorParts("s1", "m1", "error message")
-  assertEq(parts[0].text, "error message")
-})
-
-// ============================================================
-// 7. Database Tests (sql.js)
-// ============================================================
-console.log("\n--- Database Tests ---")
-
-async function runDbTests() {
-  const db = await initDatabase({ dbPath: "./test-agent-leash.db" })
-  
-  test("db: insertLesson returns an id", () => {
-    const id = db.insertLesson({
-      score: 4,
-      rule: "better use async",
-      raw_feedback: "better use async/await",
-      source_prompt: "how to handle promises",
-      source_response: "use .then()",
-      workspace: "/test/workspace",
-    })
-    assert(typeof id === "number")
-    assert(id > 0)
-  })
-  
-  test("db: listLessons returns results", () => {
-    const lessons = db.listLessons("/test/workspace", 10)
-    assert(lessons.length >= 1)
-    const last = lessons[0]
-    assertEq(last.score, 4)
-    assertEq(last.rule, "better use async")
-    assertEq(last.workspace, "/test/workspace")
-  })
-
-  test("db: listLessons filters by workspace", () => {
-    db.insertLesson({
-      score: 3,
-      rule: "other workspace",
-      raw_feedback: "test",
-      source_prompt: "",
-      source_response: "",
-      workspace: "/other/workspace",
-    })
-    const testLessons = db.listLessons("/test/workspace", 10)
-    const allHaveCorrectWorkspace = testLessons.every(l => l.workspace === "/test/workspace")
-    assert(allHaveCorrectWorkspace)
-  })
-  
-  test("db: deleteLesson works", () => {
-    const id = db.insertLesson({
-      score: 1,
-      rule: "to delete",
-      raw_feedback: "will be deleted",
-      source_prompt: "",
-      source_response: "",
-      workspace: "/test/workspace",
-    })
-    const deleted = db.deleteLesson(id)
-    assertEq(deleted, true)
-    const deleted2 = db.deleteLesson(id)
-    assertEq(deleted2, false)
-  })
-  
-  test("db: insertLesson with empty fields", () => {
-    const id = db.insertLesson({
-      score: 5,
-      rule: "",
-      raw_feedback: "",
-      source_prompt: "",
-      source_response: "",
-      workspace: "",
-    })
-    assert(typeof id === "number")
-    assert(id > 0)
-  })
-  
-  db.close()
-  
-  // Cleanup
-  const fs = await import("node:fs")
-  try { fs.unlinkSync("./test-agent-leash.db") } catch {}
-}
-
-// ============================================================
-// 8. ProcessCommand Tests (with mock DB)
-// ============================================================
-console.log("\n--- ProcessCommand Tests ---")
+console.log("\n--- processCommand Tests (v0.3) ---")
 
 function createMockDB(): import("./src/db.js").Database {
   let nextId = 1
-  const lessons: any[] = []
+  const feedbacks: any[] = []
   return {
-    insertLesson(lesson) {
+    insertFeedback(fb) {
       const id = nextId++
       const now = new Date().toISOString()
-      lessons.push({ id, ...lesson, created_at: now, updated_at: now })
+      feedbacks.push({ id, ...fb, created_at: now, updated_at: now })
       return id
     },
-    listLessons(workspace, limit) {
-      return lessons
-        .filter(l => l.workspace === workspace)
+    listFeedbacks(limit) {
+      return feedbacks
         .sort((a, b) => b.id - a.id)
         .slice(0, limit)
     },
-    deleteLesson(id) {
-      const idx = lessons.findIndex(l => l.id === id)
+    deleteFeedback(id) {
+      const idx = feedbacks.findIndex(f => f.id === id)
       if (idx === -1) return false
-      lessons.splice(idx, 1)
+      feedbacks.splice(idx, 1)
       return true
     },
+    updateRule(id, rule) {
+      const fb = feedbacks.find(f => f.id === id)
+      if (fb) {
+        fb.rule = rule
+        fb.updated_at = new Date().toISOString()
+      }
+    },
+    rebuildPreferencesFile() {},
     close() {},
   }
 }
 
-test("processCommand: feedback with cache", () => {
+test("processCommand: feedback creates entry", () => {
   const db = createMockDB()
-  const cacheEntry = { prompt: "how to code", response: "use this pattern", assistantMessageID: "m1" }
   const result = processCommand(
-    "//4 \"use async/await\"",
-    "s1", "m2", "/workspace",
-    db, cacheEntry
+    "# use Kotlin em vez de Python",
+    "s1", "m1",
+    db
   )
   assertEq(result.success, true)
+  assert(result.feedbackId !== undefined)
+  if (result.feedbackId !== undefined) assert(result.feedbackId > 0)
   assert(result.parts.length > 0)
-  assert(result.parts[0].text.includes("4"))
   assert(result.parts[0].text.includes("Feedback"))
+  assert(result.parts[0].text.includes("registrado"))
 })
 
-test("processCommand: feedback without cache", () => {
+test("processCommand: #list empty", () => {
   const db = createMockDB()
   const result = processCommand(
-    "//3 \"good\"",
-    "s1", "m2", "/workspace",
-    db, undefined
-  )
-  assertEq(result.success, true)
-  assert(result.parts[0].text.includes("3"))
-})
-
-test("processCommand: //list empty", () => {
-  const db = createMockDB()
-  const result = processCommand(
-    "//list",
-    "s1", "m2", "/workspace",
-    db, undefined
+    "#list",
+    "s1", "m1",
+    db
   )
   assertEq(result.success, true)
   assert(result.parts[0].text.includes("Nenhum"))
 })
 
-test("processCommand: //list with data", () => {
+test("processCommand: #list with data", () => {
   const db = createMockDB()
-  db.insertLesson({ score: 5, rule: "perfect", raw_feedback: "perfect", source_prompt: "", source_response: "", workspace: "/ws" })
+  db.insertFeedback({ raw_feedback: "use Kotlin", rule: null, workspace: "global" })
+  db.insertFeedback({ raw_feedback: "responda em português", rule: "Responder em português", workspace: "global" })
   const result = processCommand(
-    "//list",
-    "s1", "m2", "/ws",
-    db, undefined
+    "#list",
+    "s1", "m1",
+    db
   )
   assertEq(result.success, true)
-  assert(result.parts[0].text.includes("perfect"))
+  const text = result.parts[0].text
+  assert(text.includes("use Kotlin") || text.includes("responda em português"))
 })
 
-test("processCommand: //delete existing", () => {
+test("processCommand: #list shows rules when available", () => {
   const db = createMockDB()
-  const id = db.insertLesson({ score: 3, rule: "meh", raw_feedback: "meh", source_prompt: "", source_response: "", workspace: "/ws" })
+  db.insertFeedback({ raw_feedback: "be concise", rule: "Be concise", workspace: "global" })
   const result = processCommand(
-    `//delete ${id}`,
-    "s1", "m2", "/ws",
-    db, undefined
+    "#list",
+    "s1", "m1",
+    db
+  )
+  assertEq(result.success, true)
+  assert(result.parts[0].text.includes("Be concise"))
+})
+
+test("processCommand: #delete existing", () => {
+  const db = createMockDB()
+  const id = db.insertFeedback({ raw_feedback: "teste", rule: null, workspace: "global" })
+  const result = processCommand(
+    `#delete ${id}`,
+    "s1", "m1",
+    db
   )
   assertEq(result.success, true)
   assert(result.parts[0].text.includes(`${id}`))
+  assert(result.parts[0].text.includes("deletado"))
 })
 
-test("processCommand: //delete non-existing", () => {
+test("processCommand: #delete non-existing", () => {
   const db = createMockDB()
   const result = processCommand(
-    "//delete 999",
-    "s1", "m2", "/ws",
-    db, undefined
+    "#delete 999",
+    "s1", "m1",
+    db
   )
   assertEq(result.success, false)
   assert(result.parts[0].text.includes("não encontrado"))
 })
 
-test("processCommand: invalid score (error)", () => {
+test("processCommand: empty feedback (error)", () => {
   const db = createMockDB()
   const result = processCommand(
-    "//7 \"bad\"",
-    "s1", "m2", "/ws",
-    db, undefined
+    "#",
+    "s1", "m1",
+    db
   )
   assertEq(result.success, false)
+  assert(result.parts[0].text.includes("vazio"))
 })
 
 test("processCommand: non-command returns empty parts", () => {
   const db = createMockDB()
   const result = processCommand(
     "hello world",
-    "s1", "m2", "/ws",
-    db, undefined
+    "s1", "m1",
+    db
   )
   assertEq(result.success, false)
   assertEq(result.parts.length, 0)
 })
+
+test("processCommand: parts have correct structure", () => {
+  const db = createMockDB()
+  const result = processCommand(
+    "# test",
+    "session-abc", "msg-xyz",
+    db
+  )
+  const part = result.parts[0]
+  assertEq(part.type, "text")
+  assertEq(part.sessionID, "session-abc")
+  assertEq(part.messageID, "msg-xyz")
+  assert(typeof part.id === "string")
+  assert(part.id.length > 0)
+})
+
+// ============================================================
+// 5. Database Tests — new feedbacks schema (v0.3)
+// ============================================================
+console.log("\n--- Database Tests (v0.3) ---")
+
+async function runDbTests() {
+  const dbPath = "./test-agent-leash-v03.db"
+
+  // Cleanup from previous run
+  try { unlinkSync(dbPath) } catch {}
+
+  const db = await initDatabase({ dbPath })
+
+  test("db: insertFeedback returns an id", () => {
+    const id = db.insertFeedback({
+      raw_feedback: "better use async",
+      rule: null,
+      workspace: "global",
+    })
+    assert(typeof id === "number")
+    assert(id > 0)
+  })
+
+  test("db: insertFeedback with rule", () => {
+    const id = db.insertFeedback({
+      raw_feedback: "organiza em tópicos",
+      rule: "Organizar respostas em tópicos",
+      workspace: "global",
+    })
+    assert(typeof id === "number")
+    assert(id > 0)
+  })
+
+  test("db: listFeedbacks returns results", () => {
+    const feedbacks = db.listFeedbacks(10)
+    assert(feedbacks.length >= 2)
+    assert(feedbacks[0].id > 0)
+    assert(typeof feedbacks[0].raw_feedback === "string")
+  })
+
+  test("db: listFeedbacks ordered by created_at DESC", () => {
+    db.insertFeedback({ raw_feedback: "newest", rule: null, workspace: "global" })
+    const feedbacks = db.listFeedbacks(10)
+    assert(feedbacks.length >= 3)
+    // newest first
+    assertEq(feedbacks[0].raw_feedback, "newest")
+  })
+
+  test("db: deleteFeedback works", () => {
+    const id = db.insertFeedback({
+      raw_feedback: "to delete",
+      rule: null,
+      workspace: "global",
+    })
+    const deleted = db.deleteFeedback(id)
+    assertEq(deleted, true)
+    const deleted2 = db.deleteFeedback(id)
+    assertEq(deleted2, false)
+  })
+
+  test("db: updateRule sets rule", () => {
+    const id = db.insertFeedback({
+      raw_feedback: "rasc",
+      rule: null,
+      workspace: "global",
+    })
+    db.updateRule(id, "Prefira respostas curtas")
+    const feedbacks = db.listFeedbacks(10)
+    const updated = feedbacks.find(f => f.id === id)
+    assert(updated !== undefined)
+    assertEq(updated!.rule, "Prefira respostas curtas")
+  })
+
+  test("db: insertFeedback with empty fields", () => {
+    const id = db.insertFeedback({
+      raw_feedback: "",
+      rule: null,
+      workspace: "global",
+    })
+    assert(typeof id === "number")
+    assert(id > 0)
+  })
+
+  test("db: rebuildPreferencesFile creates file", () => {
+    db.insertFeedback({
+      raw_feedback: "seja conciso",
+      rule: "Seja conciso",
+      workspace: "global",
+    })
+    db.rebuildPreferencesFile()
+
+    const prefPath = resolvePreferencesPath()
+    assert(existsSync(prefPath), "preferences.md should exist")
+    const content = readFileSync(prefPath, "utf-8")
+    assert(content.includes("## Agent Preferences"))
+    assert(content.includes("Seja conciso"))
+  })
+
+  test("db: rebuildPreferencesFile empty when no rules", () => {
+    const allFeedbacks = db.listFeedbacks(100)
+    for (const fb of allFeedbacks) {
+      if (fb.rule) db.deleteFeedback(fb.id)
+    }
+    db.rebuildPreferencesFile()
+    const prefPath = resolvePreferencesPath()
+    const content = readFileSync(prefPath, "utf-8")
+    assertEq(content, "")
+  })
+
+  db.close()
+
+  // Cleanup
+  try { unlinkSync(dbPath) } catch {}
+  try {
+    const prefPath = resolvePreferencesPath()
+    if (existsSync(prefPath)) unlinkSync(prefPath)
+  } catch {}
+}
+
+function resolvePreferencesPath(): string {
+  const raw = PREFERENCES_PATH
+  if (raw.startsWith("~")) {
+    return raw.replace(/^~/, homedir())
+  }
+  return raw
+}
+
+// ============================================================
+// 6. Migration Tests (lessons -> feedbacks)
+// ============================================================
+console.log("\n--- Migration Tests (lessons -> feedbacks) ---")
+
+async function runMigrationTests() {
+  const dbPath = "./test-agent-leash-migration.db"
+
+  // Cleanup
+  try { unlinkSync(dbPath) } catch {}
+
+  // Create a v0.2-style lessons table manually via sql.js
+  const initSqlJs = (await import("sql.js")).default
+  const sql = await initSqlJs()
+
+  const { writeFileSync, readFileSync } = await import("node:fs")
+  let rawDb = new sql.Database()
+
+  rawDb.run(`
+    CREATE TABLE lessons (
+      id          INTEGER PRIMARY KEY AUTOINCREMENT,
+      score       INTEGER NOT NULL,
+      rule        TEXT NOT NULL DEFAULT '',
+      rule_summary TEXT DEFAULT NULL,
+      raw_feedback TEXT NOT NULL,
+      source_prompt  TEXT DEFAULT '',
+      source_response TEXT DEFAULT '',
+      embedding   BLOB DEFAULT NULL,
+      workspace   TEXT DEFAULT '',
+      created_at  TEXT NOT NULL DEFAULT (datetime('now')),
+      updated_at  TEXT NOT NULL DEFAULT (datetime('now'))
+    )
+  `)
+
+  rawDb.run(`
+    INSERT INTO lessons (score, rule, rule_summary, raw_feedback, source_prompt, source_response, workspace)
+    VALUES (4, 'use async', 'Preferir async/await', 'better use async', 'how to promise', 'use .then()', '/test')
+  `)
+  rawDb.run(`
+    INSERT INTO lessons (score, rule, rule_summary, raw_feedback, source_prompt, source_response, workspace)
+    VALUES (5, 'kotlin', 'Usar Kotlin', 'use kotlin not python', '', '', '')
+  `)
+
+  const buffer = Buffer.from(rawDb.export())
+  writeFileSync(dbPath, buffer)
+  rawDb.close()
+
+  // Now initDatabase should migrate
+  const db = await initDatabase({ dbPath })
+
+  test("migration: listFeedbacks returns migrated data", () => {
+    const feedbacks = db.listFeedbacks(10)
+    assert(feedbacks.length >= 2, `expected >= 2, got ${feedbacks.length}`)
+  })
+
+  test("migration: migrated rule_summary becomes rule", () => {
+    const feedbacks = db.listFeedbacks(10)
+    const asyncFeedback = feedbacks.find(f => f.raw_feedback === "better use async")
+    assert(asyncFeedback !== undefined, "feedback with raw_feedback 'better use async' not found")
+    assertEq(asyncFeedback!.rule, "Preferir async/await")
+  })
+
+  test("migration: empty workspace becomes 'global'", () => {
+    const feedbacks = db.listFeedbacks(10)
+    const kotlinFeedback = feedbacks.find(f => f.raw_feedback === "use kotlin not python")
+    assert(kotlinFeedback !== undefined, "feedback with raw_feedback 'use kotlin not python' not found")
+    assertEq(kotlinFeedback!.workspace, "global")
+  })
+
+  test("migration: non-empty workspace preserved", () => {
+    const feedbacks = db.listFeedbacks(10)
+    const asyncFeedback = feedbacks.find(f => f.raw_feedback === "better use async")
+    assert(asyncFeedback !== undefined)
+    assertEq(asyncFeedback!.workspace, "/test")
+  })
+
+  db.close()
+  try { unlinkSync(dbPath) } catch {}
+}
 
 // ============================================================
 // Run all sync + async tests
 // ============================================================
 async function main() {
   console.log(`\n${"=".repeat(60)}`)
-  console.log("agent-leash — Test Suite")
+  console.log("agent-leash v0.3 — Test Suite")
   console.log(`${"=".repeat(60)}`)
-  
+
   await runDbTests()
-  
-  // Wait a bit for async tests
+  await runMigrationTests()
+
   await new Promise(resolve => setTimeout(resolve, 100))
-  
+
   console.log(`\n${"=".repeat(60)}`)
   console.log(`Results: ${passed} passed, ${failed} failed`)
   console.log(`${"=".repeat(60)}`)
-  
+
   if (failed > 0) {
     process.exit(1)
   }

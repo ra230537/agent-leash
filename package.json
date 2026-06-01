@@ -1,6 +1,6 @@
 {
   "name": "@ra230537/agent-leash",
-  "version": "0.1.1",
+  "version": "0.3.0",
   "type": "module",
   "main": "./dist/index.cjs",
   "exports": {
@@ -14,6 +14,7 @@
     "build": "tsup",
     "dev": "tsup --watch",
     "typecheck": "tsc --noEmit",
+    "test": "npx tsx test.ts",
     "prepublishOnly": "npm run build"
   },
   "peerDependencies": {
